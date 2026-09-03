@@ -8,9 +8,11 @@
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
+  "enabled",
   "pos_profile",
   "target_doctype",
   "trigger_method",
+  "is_default_kitchen",
   "is_cashier",
   "column_break_p0d2r",
   "company",
@@ -24,6 +26,14 @@
   "printer_item_group"
  ],
  "fields": [
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Enabled"
+  },
   {
    "fieldname": "pos_profile",
    "fieldtype": "Link",
@@ -52,8 +62,15 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Trigger Method",
-   "options": "on_submit\nafter_insert",
+   "options": "on_submit\non_cancel\nmanual",
    "reqd": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "is_default_kitchen",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Is Default Kitchen"
   },
   {
    "default": "0",
