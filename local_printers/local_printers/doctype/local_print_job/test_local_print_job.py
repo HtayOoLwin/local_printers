@@ -112,9 +112,11 @@ class TestLocalPrintJob(FrappeTestCase):
 			payload=b"test-pdf",
 			event_key=f"test-event-{frappe.generate_hash(length=12)}",
 			source_rows=("SOI-1", "SOI-2"),
+			no_letterhead=True,
 		)
 
 		self.assertEqual(json.loads(job.source_rows), ["SOI-1", "SOI-2"])
+		self.assertEqual(job.no_letterhead, 1)
 
 	def test_claim_transitions_job_and_increments_attempt(self):
 		job = self._create_job()

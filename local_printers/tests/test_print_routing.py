@@ -265,10 +265,64 @@ class EventJobTestCase(unittest.TestCase):
 		self.assertNotIn("payload", json.dumps(wake.kwargs["message"]).lower())
 		self.assertEqual(wake.kwargs["message"]["document_name"], "SO-0001")
 
+	def test_submit_notifies_successful_jobs_when_another_route_fails(self):
+		routing.route_order_items = Mock(
+			return_value=[
+				routing.PrinterRoute("CFG-A", "Grill", "Kitchen", True, "Kitchen", ("SOI-1",)),
+				routing.PrinterRoute("CFG-B", "Bar", "Standard", False, "Kitchen", ("SOI-2",)),
+			]
+		)
+		routing.create_print_job.side_effect = [
+			SimpleNamespace(job_id="job-grill", status="Pending", printer="Grill", ticket_type="Kitchen"),
+			RuntimeError("Bar printer job failed"),
+		]
+
+		routing.on_sales_order_submit(self.doc)
+
+		self.frappish.publish_realtime.assert_called_once()
+		jobs = self.frappish.publish_realtime.call_args.kwargs["message"]["jobs"]
+		self.assertEqual([job["job_id"] for job in jobs], ["job-grill"])
+		self.assertEqual(self.frappish.log_error.call_count, 1)
+		self.assertIn("Bar", self.frappish.log_error.call_args.args[1])
+
+	def test_repeated_submit_has_one_durable_job_per_printer(self):
+		routing.route_order_items = Mock(
+			return_value=[
+				routing.PrinterRoute("CFG-A", "Grill", "Kitchen", True, "Kitchen", ("SOI-1",)),
+				routing.PrinterRoute("CFG-B", "Bar", "Standard", False, "Kitchen", ("SOI-2",)),
+			]
+		)
+		persisted_jobs = {}
+
+		def create_once(**kwargs):
+			return persisted_jobs.setdefault(
+				kwargs["event_key"],
+				SimpleNamespace(
+					job_id=kwargs["event_key"],
+					status="Pending",
+					printer=kwargs["printer"],
+					ticket_type=kwargs["ticket_type"],
+				),
+			)
+
+		routing.create_print_job.side_effect = create_once
+
+		routing.on_sales_order_submit(self.doc)
+		routing.on_sales_order_submit(self.doc)
+
+		self.assertEqual(
+			set(persisted_jobs),
+			{
+				"Sales Order/SO-0001/Grill/on_submit",
+				"Sales Order/SO-0001/Bar/on_submit",
+			},
+		)
+		self.assertEqual(len(persisted_jobs), 2)
+
 	def test_cancel_uses_original_job_rows_without_item_rerouting(self):
 		original_jobs = [
-			DictObject(printer="Grill", print_format="Kitchen", source_rows='["SOI-1"]'),
-			DictObject(printer="Bar", print_format="Bar Ticket", source_rows='["SOI-2"]'),
+			DictObject(printer="Grill", print_format="Kitchen", no_letterhead=0, source_rows='["SOI-1"]'),
+			DictObject(printer="Bar", print_format="Bar Ticket", no_letterhead=1, source_rows='["SOI-2"]'),
 		]
 		cancel_configs = [config("CFG-CANCEL", "Grill", print_format="Cancel Kitchen", no_letterhead=1)]
 
@@ -301,6 +355,48 @@ class EventJobTestCase(unittest.TestCase):
 			[[item.name for item in entry.kwargs["doc"].items] for entry in self.frappish.get_print.call_args_list],
 			[["SOI-1"], ["SOI-2"]],
 		)
+		self.assertEqual(
+			[entry.kwargs["no_letterhead"] for entry in self.frappish.get_print.call_args_list],
+			[True, True],
+		)
+
+	def test_cancel_notifies_successful_jobs_when_another_route_fails(self):
+		self.frappish.get_all.side_effect = lambda doctype, **kwargs: (
+			[
+				DictObject(printer="Grill", print_format="Kitchen", no_letterhead=0, source_rows='["SOI-1"]'),
+				DictObject(printer="Bar", print_format="Bar Ticket", no_letterhead=0, source_rows='["SOI-2"]'),
+			]
+			if doctype == "Local Print Job"
+			else []
+		)
+		routing.create_print_job.side_effect = [
+			SimpleNamespace(job_id="job-grill", status="Pending", printer="Grill", ticket_type="Cancel"),
+			RuntimeError("Bar cancel job failed"),
+		]
+
+		routing.on_sales_order_cancel(self.doc)
+
+		self.frappish.publish_realtime.assert_called_once()
+		jobs = self.frappish.publish_realtime.call_args.kwargs["message"]["jobs"]
+		self.assertEqual([job["job_id"] for job in jobs], ["job-grill"])
+		self.assertEqual(self.frappish.log_error.call_count, 1)
+		self.assertIn("Bar", self.frappish.log_error.call_args.args[1])
+
+	def test_cancel_uses_later_valid_route_for_same_printer(self):
+		self.frappish.get_all.side_effect = lambda doctype, **kwargs: (
+			[
+				DictObject(printer="Grill", print_format="Old", no_letterhead=0, source_rows=None),
+				DictObject(printer="Grill", print_format="Kitchen", no_letterhead=1, source_rows='["SOI-1"]'),
+			]
+			if doctype == "Local Print Job"
+			else []
+		)
+
+		routing.on_sales_order_cancel(self.doc)
+
+		routing.create_print_job.assert_called_once()
+		self.assertEqual(routing.create_print_job.call_args.kwargs["source_rows"], ("SOI-1",))
+		self.assertTrue(self.frappish.get_print.call_args.kwargs["no_letterhead"])
 
 
 class HookTestCase(unittest.TestCase):

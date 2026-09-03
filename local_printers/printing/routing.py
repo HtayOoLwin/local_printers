@@ -146,10 +146,11 @@ def route_order_items(doc, trigger_method: str) -> list[PrinterRoute]:
 
 def on_sales_order_submit(doc, method=None) -> None:
 	try:
-		jobs = [
-			_create_route_job(doc, route, "on_submit")
-			for route in route_order_items(doc, "on_submit")
-		]
+		jobs = _create_route_jobs(
+			doc,
+			route_order_items(doc, "on_submit"),
+			"on_submit",
+		)
 		_publish_wake_notification(doc, "on_submit", jobs)
 	except Exception:
 		_log_handler_error(doc, "on_submit")
@@ -164,7 +165,7 @@ def on_sales_order_cancel(doc, method=None) -> None:
 				"source_name": doc.name,
 				"ticket_type": "Kitchen",
 			},
-			fields=["printer", "print_format", "source_rows"],
+			fields=["printer", "print_format", "no_letterhead", "source_rows"],
 			order_by="creation asc, name asc",
 		)
 		if not original_jobs:
@@ -186,13 +187,12 @@ def on_sales_order_cancel(doc, method=None) -> None:
 			for configuration in cancel_configurations
 		}
 
-		jobs = []
+		routes = []
 		seen_printers = set()
 		for original_job in original_jobs:
 			printer = _value(original_job, "printer")
 			if not printer or printer in seen_printers:
 				continue
-			seen_printers.add(printer)
 			source_rows = _decode_source_rows(_value(original_job, "source_rows"))
 			if not source_rows:
 				frappe.log_error(
@@ -201,6 +201,7 @@ def on_sales_order_cancel(doc, method=None) -> None:
 					"Missing Sales Order cancel route metadata",
 				)
 				continue
+			seen_printers.add(printer)
 
 			cancel_configuration = cancel_by_printer.get(printer)
 			route = PrinterRoute(
@@ -217,13 +218,14 @@ def on_sales_order_cancel(doc, method=None) -> None:
 				no_letterhead=(
 					_as_bool(_value(cancel_configuration, "no_letterhead"))
 					if cancel_configuration
-					else False
+					else _as_bool(_value(original_job, "no_letterhead"))
 				),
 				ticket_type="Cancel",
 				source_rows=source_rows,
 			)
-			jobs.append(_create_route_job(doc, route, "on_cancel"))
+			routes.append(route)
 
+		jobs = _create_route_jobs(doc, routes, "on_cancel")
 		_publish_wake_notification(doc, "on_cancel", jobs)
 	except Exception:
 		_log_handler_error(doc, "on_cancel")
@@ -250,7 +252,18 @@ def _create_route_job(doc, route: PrinterRoute, trigger_method: str):
 		payload=payload,
 		event_key=f"Sales Order/{doc.name}/{route.printer}/{trigger_method}",
 		source_rows=route.source_rows,
+		no_letterhead=route.no_letterhead,
 	)
+
+
+def _create_route_jobs(doc, routes, trigger_method: str):
+	jobs = []
+	for route in routes:
+		try:
+			jobs.append(_create_route_job(doc, route, trigger_method))
+		except Exception:
+			_log_route_error(doc, trigger_method, route.printer)
+	return jobs
 
 
 def _publish_wake_notification(doc, trigger_method: str, jobs) -> None:
@@ -310,4 +323,16 @@ def _log_handler_error(doc, trigger_method: str) -> None:
 	frappe.log_error(
 		traceback,
 		f"Error creating {trigger_method} print jobs for Sales Order {doc.name}",
+	)
+
+
+def _log_route_error(doc, trigger_method: str, printer: str) -> None:
+	traceback = (
+		frappe.get_traceback()
+		if hasattr(frappe, "get_traceback")
+		else f"Unable to create {trigger_method} print job."
+	)
+	frappe.log_error(
+		traceback,
+		f"Error creating {trigger_method} print job for Sales Order {doc.name} on {printer}",
 	)

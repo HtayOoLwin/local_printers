@@ -19,6 +19,7 @@ CLAIMED_JOB_FIELDS = (
 	"ticket_type",
 	"printer",
 	"print_format",
+	"no_letterhead",
 	"source_rows",
 	"status",
 	"attempt_count",
@@ -37,6 +38,7 @@ def create_print_job(
 	payload: bytes | str,
 	event_key: str | None = None,
 	source_rows: tuple[str, ...] | list[str] | None = None,
+	no_letterhead: bool = False,
 ) -> Document:
 	"""Persist a print payload, deduplicating deterministic ticket events."""
 	if ticket_type not in ("Kitchen", "Cancel", "Cashier"):
@@ -79,6 +81,7 @@ def create_print_job(
 			"ticket_type": ticket_type,
 			"printer": printer,
 			"print_format": print_format,
+			"no_letterhead": 1 if no_letterhead else 0,
 			"source_rows": json.dumps(list(source_rows)) if source_rows else None,
 			"status": "Pending",
 			"attempt_count": 0,
