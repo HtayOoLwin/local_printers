@@ -162,6 +162,54 @@ def claim_next_jobs(worker_id: str, limit: int = 10) -> list[dict]:
 	]
 
 
+def retry_failed_job(job_id: str) -> dict:
+	"""Reset a failed job for a new manually authorized attempt cycle."""
+	if not job_id:
+		frappe.throw(_("Print job ID is required."), frappe.ValidationError)
+
+	rows = frappe.db.sql(
+		"""
+		SELECT name, job_id, status, worker_id, attempt_count
+		FROM `tabLocal Print Job`
+		WHERE job_id = %(job_id)s
+		FOR UPDATE
+		""",
+		{"job_id": job_id},
+		as_dict=True,
+	)
+	if not rows:
+		frappe.throw(_("Unknown local print job."), frappe.ValidationError)
+
+	job = rows[0]
+	if job.status != "Failed":
+		frappe.throw(
+			_("Only a Failed job can be retried."),
+			frappe.ValidationError,
+		)
+
+	frappe.db.set_value(
+		"Local Print Job",
+		job.name,
+		{
+			"status": "Pending",
+			"attempt_count": 0,
+			"worker_id": None,
+			"claimed_at": None,
+			"error_message": None,
+			"requested_by": frappe.session.user,
+		},
+		update_modified=False,
+	)
+	return dict(
+		frappe.db.get_value(
+			"Local Print Job",
+			job.name,
+			("job_id", "status", "attempt_count", "requested_by"),
+			as_dict=True,
+		)
+	)
+
+
 def acknowledge_job(
 	job_id: str,
 	worker_id: str,
