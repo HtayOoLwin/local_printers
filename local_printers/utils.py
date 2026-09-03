@@ -10,8 +10,7 @@ from frappe import _
 @frappe.whitelist()
 def send_doc_details_on_event(doc, method=None):
     """
-    Render print format as PDF for each configured printer and broadcast
-    ready-to-print payloads via Frappe realtime (Socket.IO).
+    Legacy PDF bridge for explicitly supported non-Sales-Order callers.
 
     Each payload contains:
       - printer: printer system name
@@ -21,15 +20,8 @@ def send_doc_details_on_event(doc, method=None):
       - document_name: document name (for logging)
     """
     if doc.doctype == "Sales Order":
-        from local_printers.printing.routing import (
-            on_sales_order_cancel,
-            on_sales_order_submit,
-        )
-
-        if method == "on_cancel":
-            on_sales_order_cancel(doc, method)
-        else:
-            on_sales_order_submit(doc, method)
+        # Kitchen and Cancel jobs are owned exclusively by the narrow document
+        # hooks, which carry Frappe's persisted lifecycle/authorization context.
         return
 
     # Compatibility for explicit legacy callers; this is no longer a wildcard hook.

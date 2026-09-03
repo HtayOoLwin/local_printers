@@ -40,6 +40,7 @@
    "fieldname": "event_key",
    "fieldtype": "Data",
    "label": "Event Key",
+   "length": 320,
    "unique": 1
   },
   {

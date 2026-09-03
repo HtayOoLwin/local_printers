@@ -189,17 +189,15 @@ def on_sales_order_cancel(doc, method=None) -> None:
 
 		routes = []
 		seen_printers = set()
+		printers_missing_route_rows = []
 		for original_job in original_jobs:
 			printer = _value(original_job, "printer")
 			if not printer or printer in seen_printers:
 				continue
 			source_rows = _decode_source_rows(_value(original_job, "source_rows"))
 			if not source_rows:
-				frappe.log_error(
-					f"Sales Order {doc.name} has no durable route rows for printer {printer}; "
-					"the Cancel ticket was skipped.",
-					"Missing Sales Order cancel route metadata",
-				)
+				if printer not in printers_missing_route_rows:
+					printers_missing_route_rows.append(printer)
 				continue
 			seen_printers.add(printer)
 
@@ -224,6 +222,14 @@ def on_sales_order_cancel(doc, method=None) -> None:
 				source_rows=source_rows,
 			)
 			routes.append(route)
+
+		for printer in printers_missing_route_rows:
+			if printer not in seen_printers:
+				frappe.log_error(
+					f"Sales Order {doc.name} has no durable route rows for printer {printer}; "
+					"the Cancel ticket was skipped.",
+					"Missing Sales Order cancel route metadata",
+				)
 
 		jobs = _create_route_jobs(doc, routes, "on_cancel")
 		_publish_wake_notification(doc, "on_cancel", jobs)

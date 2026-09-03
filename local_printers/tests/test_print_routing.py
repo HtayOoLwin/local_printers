@@ -3,8 +3,9 @@ import json
 import sys
 import types
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 def _install_frappe_stub():
@@ -20,6 +21,7 @@ def _install_frappe_stub():
 	frappe.DuplicateEntryError = type("DuplicateEntryError", (Exception,), {})
 	frappe.session = SimpleNamespace(user="test@example.com")
 	frappe.db = SimpleNamespace()
+	frappe.whitelist = lambda *args, **kwargs: lambda function: function
 
 	model = types.ModuleType("frappe.model")
 	document = types.ModuleType("frappe.model.document")
@@ -37,6 +39,7 @@ def _install_frappe_stub():
 _install_frappe_stub()
 
 from local_printers import hooks
+from local_printers import utils as legacy_utils
 
 routing = importlib.import_module("local_printers.printing.routing")
 
@@ -397,6 +400,61 @@ class EventJobTestCase(unittest.TestCase):
 		routing.create_print_job.assert_called_once()
 		self.assertEqual(routing.create_print_job.call_args.kwargs["source_rows"], ("SOI-1",))
 		self.assertTrue(self.frappish.get_print.call_args.kwargs["no_letterhead"])
+		self.frappish.log_error.assert_not_called()
+
+	def test_cancel_logs_once_when_no_same_printer_history_has_route_rows(self):
+		self.frappish.get_all.side_effect = lambda doctype, **kwargs: (
+			[
+				DictObject(printer="Grill", print_format="Old", no_letterhead=0, source_rows=None),
+				DictObject(printer="Grill", print_format="Kitchen", no_letterhead=1, source_rows="[]"),
+			]
+			if doctype == "Local Print Job"
+			else []
+		)
+
+		routing.on_sales_order_cancel(self.doc)
+
+		routing.create_print_job.assert_not_called()
+		self.assertEqual(self.frappish.log_error.call_count, 1)
+		self.assertIn("Grill", self.frappish.log_error.call_args.args[0])
+
+
+class LegacyWrapperTestCase(unittest.TestCase):
+	def test_public_legacy_wrapper_never_dispatches_sales_order_jobs(self):
+		doc = SimpleNamespace(
+			doctype="Sales Order",
+			name="SO-0001",
+			pos_profile="Main POS",
+		)
+
+		with (
+			patch.object(routing, "on_sales_order_submit") as submit,
+			patch.object(routing, "on_sales_order_cancel") as cancel,
+		):
+			for method in (None, "on_submit", "on_cancel", "after_insert", "manual", "invalid"):
+				with self.subTest(method=method):
+					legacy_utils.send_doc_details_on_event(doc, method)
+
+		submit.assert_not_called()
+		cancel.assert_not_called()
+
+
+class SchemaBoundaryTestCase(unittest.TestCase):
+	def test_event_key_field_fits_maximum_valid_route_key(self):
+		schema_path = (
+			Path(__file__).parents[1]
+			/ "local_printers"
+			/ "doctype"
+			/ "local_print_job"
+			/ "local_print_job.json"
+		)
+		schema = json.loads(schema_path.read_text())
+		event_key_field = next(
+			field for field in schema["fields"] if field["fieldname"] == "event_key"
+		)
+		maximum_route_key = f"Sales Order/{'S' * 140}/{'P' * 140}/on_submit"
+
+		self.assertGreaterEqual(event_key_field.get("length", 140), len(maximum_route_key))
 
 
 class HookTestCase(unittest.TestCase):
