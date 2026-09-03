@@ -27,7 +27,18 @@ def _install_frappe_stub():
 	frappe.AuthenticationError = type("AuthenticationError", (Exception,), {})
 	frappe.DuplicateEntryError = type("DuplicateEntryError", (Exception,), {})
 	frappe.session = SimpleNamespace(user="worker@example.com")
-	frappe.whitelist = lambda *args, **kwargs: lambda function: function
+	frappe.allowed_http_methods_for_whitelisted_func = {}
+
+	def whitelist(*, allow_guest=False, methods=None, **kwargs):
+		allowed_methods = list(methods or ("GET", "POST", "PUT", "DELETE"))
+
+		def decorate(function):
+			frappe.allowed_http_methods_for_whitelisted_func[function] = allowed_methods
+			return function
+
+		return decorate
+
+	frappe.whitelist = whitelist
 	frappe.throw = lambda message, exc=None, **kwargs: (_ for _ in ()).throw(
 		(exc or frappe.ValidationError)(message)
 	)
@@ -76,6 +87,7 @@ class FakeDB:
 		self.heartbeats = {}
 		self.pos_profiles = {"Main POS", "Other POS"}
 		self.last_claim_limit = None
+		self.heartbeat_lookup_misses = 0
 
 	def add_job(
 		self,
@@ -146,6 +158,12 @@ class FakeDB:
 				result = DictObject({field: job.get(field) for field in fields})
 				return result if as_dict else tuple(result.values())
 			return job.get(fields)
+		if doctype == "Local Printer Worker Heartbeat":
+			if self.heartbeat_lookup_misses:
+				self.heartbeat_lookup_misses -= 1
+				return None
+			heartbeat = self.heartbeats.get(name_or_filters)
+			return heartbeat.get(fields) if heartbeat else None
 
 		raise AssertionError(f"Unexpected get_value for {doctype}")
 
@@ -172,6 +190,9 @@ class FakeDB:
 
 	def exists(self, doctype, name_or_filters):
 		if doctype == "Local Printer Worker Heartbeat":
+			if self.heartbeat_lookup_misses:
+				self.heartbeat_lookup_misses -= 1
+				return None
 			return name_or_filters if name_or_filters in self.heartbeats else None
 		if doctype == "POS Profile":
 			return name_or_filters if name_or_filters in self.pos_profiles else None
@@ -194,6 +215,7 @@ class PrintJobAPITestCase(unittest.TestCase):
 	JOB_A = "11111111-1111-4111-8111-111111111111"
 	JOB_B = "22222222-2222-4222-8222-222222222222"
 	JOB_C = "33333333-3333-4333-8333-333333333333"
+	JOB_WITH_HEX = "abcdef12-abcd-4abc-8abc-abcdefabcdef"
 
 	def setUp(self):
 		self.db = FakeDB()
@@ -257,6 +279,22 @@ class PrintJobAPITestCase(unittest.TestCase):
 		)
 		return [DictObject(row) for row in rows[: kwargs.get("limit", len(rows))]]
 
+	def bind_worker(self, worker_id="kitchen-worker-1", user="worker@example.com"):
+		self.db.heartbeats[worker_id] = {
+			"doctype": "Local Printer Worker Heartbeat",
+			"worker_id": worker_id,
+			"user": user,
+			"last_seen": NOW - timedelta(minutes=1),
+		}
+
+	def test_mutating_endpoints_are_post_only_and_status_allows_get(self):
+		methods = frappe.allowed_http_methods_for_whitelisted_func
+
+		self.assertEqual(methods[print_jobs.claim_jobs], ["POST"])
+		self.assertEqual(methods[print_jobs.acknowledge], ["POST"])
+		self.assertEqual(methods[print_jobs.retry_failed], ["POST"])
+		self.assertIn("GET", methods[print_jobs.get_status])
+
 	def test_worker_claims_jobs_through_lifecycle_service_and_updates_heartbeat(self):
 		self.db.add_job(self.JOB_A)
 
@@ -277,6 +315,7 @@ class PrintJobAPITestCase(unittest.TestCase):
 		)
 
 	def test_worker_acknowledges_claimed_job(self):
+		self.bind_worker()
 		self.db.add_job(
 			self.JOB_A,
 			status="Printing",
@@ -300,11 +339,88 @@ class PrintJobAPITestCase(unittest.TestCase):
 		with self.assertRaises(frappe.PermissionError):
 			print_jobs.claim_jobs("kitchen-worker-1")
 
-	def test_guest_cannot_use_worker_api(self):
+	def test_guest_cannot_use_any_print_job_api(self):
 		frappe.session.user = "Guest"
+		calls = (
+			("claim", lambda: print_jobs.claim_jobs("kitchen-worker-1")),
+			(
+				"acknowledge",
+				lambda: print_jobs.acknowledge(
+					self.JOB_A, "kitchen-worker-1", success=1
+				),
+			),
+			("retry", lambda: print_jobs.retry_failed(self.JOB_A)),
+			("status", lambda: print_jobs.get_status("Main POS")),
+		)
 
-		with self.assertRaises(frappe.AuthenticationError):
+		for endpoint, call in calls:
+			with self.subTest(endpoint=endpoint), self.assertRaises(
+				frappe.AuthenticationError
+			):
+				call()
+
+	def test_another_account_cannot_claim_with_an_owned_worker_id(self):
+		self.bind_worker(user="first-worker@example.com")
+		original = dict(self.db.heartbeats["kitchen-worker-1"])
+		frappe.session.user = "second-worker@example.com"
+
+		with self.assertRaises(frappe.PermissionError):
 			print_jobs.claim_jobs("kitchen-worker-1")
+
+		self.assertEqual(self.db.heartbeats["kitchen-worker-1"], original)
+
+	def test_another_account_cannot_acknowledge_with_an_owned_worker_id(self):
+		self.bind_worker(user="first-worker@example.com")
+		self.db.add_job(
+			self.JOB_A,
+			status="Printing",
+			attempt_count=1,
+			worker_id="kitchen-worker-1",
+		)
+		frappe.session.user = "second-worker@example.com"
+
+		with self.assertRaises(frappe.PermissionError):
+			print_jobs.acknowledge(
+				self.JOB_A,
+				"kitchen-worker-1",
+				success=1,
+			)
+
+		self.assertEqual(self.db.jobs[self.JOB_A]["status"], "Printing")
+
+	def test_existing_worker_heartbeat_is_updated_for_its_owner(self):
+		self.bind_worker()
+
+		print_jobs.claim_jobs("kitchen-worker-1")
+
+		self.assertEqual(
+			self.db.heartbeats["kitchen-worker-1"]["last_seen"], NOW
+		)
+		self.assertEqual(
+			self.db.heartbeats["kitchen-worker-1"]["user"],
+			"worker@example.com",
+		)
+
+	def test_duplicate_worker_registration_race_recovers_for_same_owner(self):
+		self.bind_worker()
+		self.db.heartbeat_lookup_misses = 1
+
+		print_jobs.claim_jobs("kitchen-worker-1")
+
+		self.assertEqual(
+			self.db.heartbeats["kitchen-worker-1"]["last_seen"], NOW
+		)
+
+	def test_duplicate_worker_registration_race_cannot_replace_owner(self):
+		self.bind_worker(user="first-worker@example.com")
+		original = dict(self.db.heartbeats["kitchen-worker-1"])
+		self.db.heartbeat_lookup_misses = 1
+		frappe.session.user = "second-worker@example.com"
+
+		with self.assertRaises(frappe.PermissionError):
+			print_jobs.claim_jobs("kitchen-worker-1")
+
+		self.assertEqual(self.db.heartbeats["kitchen-worker-1"], original)
 
 	def test_manager_and_system_manager_can_retry_failed_job(self):
 		for role in ("Restaurant Manager", "System Manager"):
@@ -416,6 +532,7 @@ class PrintJobAPITestCase(unittest.TestCase):
 		self.assertEqual(self.db.last_claim_limit, 50)
 
 	def test_acknowledgement_validates_success_and_error(self):
+		self.bind_worker()
 		self.db.add_job(
 			self.JOB_A,
 			status="Printing",
@@ -423,7 +540,7 @@ class PrintJobAPITestCase(unittest.TestCase):
 			worker_id="kitchen-worker-1",
 		)
 
-		for success in (-1, 2, "yes", None):
+		for success in (-1, 2, "yes", None, 0.0, 1.0):
 			with self.subTest(success=success), self.assertRaises(
 				frappe.ValidationError
 			):
@@ -442,6 +559,7 @@ class PrintJobAPITestCase(unittest.TestCase):
 			)
 
 	def test_different_worker_cannot_acknowledge(self):
+		self.bind_worker(worker_id="kitchen-worker-2")
 		self.db.add_job(
 			self.JOB_A,
 			status="Printing",
@@ -455,6 +573,23 @@ class PrintJobAPITestCase(unittest.TestCase):
 				"kitchen-worker-2",
 				success=1,
 			)
+
+	def test_uppercase_uuid_is_normalized_before_acknowledgement(self):
+		self.bind_worker()
+		self.db.add_job(
+			self.JOB_WITH_HEX,
+			status="Printing",
+			attempt_count=1,
+			worker_id="kitchen-worker-1",
+		)
+
+		result = print_jobs.acknowledge(
+			self.JOB_WITH_HEX.upper(),
+			"kitchen-worker-1",
+			success="1",
+		)
+
+		self.assertEqual(result, {"status": "Success"})
 
 	def test_automatic_claim_never_exceeds_three_attempts(self):
 		self.db.add_job(self.JOB_A, attempt_count=3)

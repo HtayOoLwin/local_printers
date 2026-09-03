@@ -47,7 +47,7 @@ def _validated_job_id(job_id: str) -> str:
 		frappe.throw(_("Invalid print job ID."), frappe.ValidationError)
 	if str(parsed) != job_id.lower():
 		frappe.throw(_("Invalid print job ID."), frappe.ValidationError)
-	return job_id
+	return str(parsed)
 
 
 def _validated_limit(limit: int) -> int:
@@ -67,10 +67,12 @@ def _validated_limit(limit: int) -> int:
 
 
 def _validated_success(success: int) -> bool:
-	if success in (0, "0", False):
-		return False
-	if success in (1, "1", True):
-		return True
+	if isinstance(success, bool):
+		return success
+	if type(success) is int and success in (0, 1):
+		return bool(success)
+	if isinstance(success, str) and success in ("0", "1"):
+		return success == "1"
 	frappe.throw(_("Success must be either 0 or 1."), frappe.ValidationError)
 
 
@@ -96,18 +98,36 @@ def _validated_pos_profile(pos_profile: str) -> str:
 	return pos_profile
 
 
-def _touch_worker_heartbeat(worker_id: str) -> None:
-	values = {
-		"user": frappe.session.user,
-		"last_seen": now_datetime(),
-	}
-	if frappe.db.exists("Local Printer Worker Heartbeat", worker_id):
-		frappe.db.set_value(
-			"Local Printer Worker Heartbeat",
-			worker_id,
-			values,
-			update_modified=False,
+def _worker_owner(worker_id: str) -> str | None:
+	return frappe.db.get_value(
+		"Local Printer Worker Heartbeat",
+		worker_id,
+		"user",
+	)
+
+
+def _require_worker_owner(worker_id: str) -> None:
+	if _worker_owner(worker_id) != frappe.session.user:
+		frappe.throw(
+			_("This worker ID belongs to a different authenticated user."),
+			frappe.PermissionError,
 		)
+
+
+def _update_worker_heartbeat(worker_id: str) -> None:
+	frappe.db.set_value(
+		"Local Printer Worker Heartbeat",
+		worker_id,
+		"last_seen",
+		now_datetime(),
+		update_modified=False,
+	)
+
+
+def _register_or_touch_worker(worker_id: str) -> None:
+	if _worker_owner(worker_id):
+		_require_worker_owner(worker_id)
+		_update_worker_heartbeat(worker_id)
 		return
 
 	try:
@@ -115,17 +135,15 @@ def _touch_worker_heartbeat(worker_id: str) -> None:
 			{
 				"doctype": "Local Printer Worker Heartbeat",
 				"worker_id": worker_id,
-				**values,
+				"user": frappe.session.user,
+				"last_seen": now_datetime(),
 			}
 		).insert(ignore_permissions=True)
 	except frappe.DuplicateEntryError:
-		# A concurrent claim from the same worker may have inserted the row.
-		frappe.db.set_value(
-			"Local Printer Worker Heartbeat",
-			worker_id,
-			values,
-			update_modified=False,
-		)
+		# Re-read the binding after a concurrent registration attempt. Only the
+		# same authenticated owner may recover the race and refresh last_seen.
+		_require_worker_owner(worker_id)
+		_update_worker_heartbeat(worker_id)
 
 
 def _latest_heartbeat():
@@ -139,34 +157,35 @@ def _latest_heartbeat():
 	return get_datetime(rows[0].last_seen) if rows else None
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def claim_jobs(worker_id: str, limit: int = 10) -> dict:
 	"""Claim pending jobs for an authenticated Windows print worker."""
 	_require_roles(frozenset((WORKER_ROLE,)))
 	worker_id = _validated_worker_id(worker_id)
 	limit = _validated_limit(limit)
-	_touch_worker_heartbeat(worker_id)
+	_register_or_touch_worker(worker_id)
 	return {"jobs": claim_next_jobs(worker_id, limit)}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def acknowledge(
 	job_id: str,
 	worker_id: str,
 	success: int,
 	error: str | None = None,
 ) -> dict:
-	"""Acknowledge a claimed job without exposing broader DocType writes."""
+	"""Acknowledge a claim; success accepts bool/int 0/1 or strings ``0``/``1``."""
 	_require_roles(frozenset((WORKER_ROLE,)))
 	job_id = _validated_job_id(job_id)
 	worker_id = _validated_worker_id(worker_id)
+	_require_worker_owner(worker_id)
 	success_value = _validated_success(success)
 	error = _validated_error(error)
 	result = acknowledge_job(job_id, worker_id, success_value, error)
 	return {"status": result["status"]}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def retry_failed(job_id: str) -> dict:
 	"""Requeue a failed job for a fresh, bounded automatic attempt cycle."""
 	_require_roles(RETRY_ROLES)
