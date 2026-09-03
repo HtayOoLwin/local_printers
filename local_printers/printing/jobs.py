@@ -1,4 +1,5 @@
 import base64
+import json
 import uuid
 
 import frappe
@@ -18,6 +19,7 @@ CLAIMED_JOB_FIELDS = (
 	"ticket_type",
 	"printer",
 	"print_format",
+	"source_rows",
 	"status",
 	"attempt_count",
 	"worker_id",
@@ -34,6 +36,7 @@ def create_print_job(
 	print_format: str | None,
 	payload: bytes | str,
 	event_key: str | None = None,
+	source_rows: tuple[str, ...] | list[str] | None = None,
 ) -> Document:
 	"""Persist a print payload, deduplicating deterministic ticket events."""
 	if ticket_type not in ("Kitchen", "Cancel", "Cashier"):
@@ -76,6 +79,7 @@ def create_print_job(
 			"ticket_type": ticket_type,
 			"printer": printer,
 			"print_format": print_format,
+			"source_rows": json.dumps(list(source_rows)) if source_rows else None,
 			"status": "Pending",
 			"attempt_count": 0,
 			"payload": encoded_payload,

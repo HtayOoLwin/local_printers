@@ -20,7 +20,19 @@ def send_doc_details_on_event(doc, method=None):
       - pdf_base64: base64-encoded PDF content (ready to print)
       - document_name: document name (for logging)
     """
-    # Guard against the wildcard ("*") doc_events hook firing on every doctype:
+    if doc.doctype == "Sales Order":
+        from local_printers.printing.routing import (
+            on_sales_order_cancel,
+            on_sales_order_submit,
+        )
+
+        if method == "on_cancel":
+            on_sales_order_cancel(doc, method)
+        else:
+            on_sales_order_submit(doc, method)
+        return
+
+    # Compatibility for explicit legacy callers; this is no longer a wildcard hook.
     # skip anything that can't possibly be POS-linked, and explicitly skip
     # "Error Log" so a failure here can never recursively re-trigger itself
     # via frappe.log_error() creating a new Error Log document.

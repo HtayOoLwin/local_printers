@@ -13,6 +13,7 @@
   "ticket_type",
   "printer",
   "print_format",
+  "source_rows",
   "status",
   "attempt_count",
   "worker_id",
@@ -80,6 +81,13 @@
    "fieldtype": "Link",
    "label": "Print Format",
    "options": "Print Format"
+  },
+  {
+   "fieldname": "source_rows",
+   "fieldtype": "Long Text",
+   "hidden": 1,
+   "label": "Source Rows",
+   "read_only": 1
   },
   {
    "default": "Pending",

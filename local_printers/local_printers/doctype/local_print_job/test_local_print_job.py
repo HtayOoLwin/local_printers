@@ -2,6 +2,7 @@
 # See license.txt
 
 import base64
+import json
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
@@ -101,6 +102,19 @@ class TestLocalPrintJob(FrappeTestCase):
 		)
 
 		self.assertEqual(job.payload, encoded_payload)
+
+	def test_source_rows_are_stored_as_json_route_metadata(self):
+		job = create_print_job(
+			source_doc=self.source_doc,
+			printer=self.printer,
+			ticket_type="Kitchen",
+			print_format="Standard",
+			payload=b"test-pdf",
+			event_key=f"test-event-{frappe.generate_hash(length=12)}",
+			source_rows=("SOI-1", "SOI-2"),
+		)
+
+		self.assertEqual(json.loads(job.source_rows), ["SOI-1", "SOI-2"])
 
 	def test_claim_transitions_job_and_increments_attempt(self):
 		job = self._create_job()

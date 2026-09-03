@@ -117,9 +117,9 @@ app_license = "MIT"
 # Hook on document methods and events
 
 doc_events = {
-    "*": {
-        "on_submit": "local_printers.utils.send_doc_details_on_event",
-        "after_insert": "local_printers.utils.send_doc_details_on_event",
+    "Sales Order": {
+        "on_submit": "local_printers.printing.routing.on_sales_order_submit",
+        "on_cancel": "local_printers.printing.routing.on_sales_order_cancel",
     }
 }
 
