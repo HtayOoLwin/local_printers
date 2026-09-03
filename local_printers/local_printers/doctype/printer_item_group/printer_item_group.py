@@ -24,6 +24,11 @@ class PrinterItemGroup(Document):
 				_("A default kitchen printer must target Sales Order."),
 				frappe.ValidationError,
 			)
+		if cint(self.is_default_kitchen) and self.trigger_method != "on_submit":
+			frappe.throw(
+				_("A default kitchen printer must use the on_submit trigger method."),
+				frappe.ValidationError,
+			)
 
 		if cint(self.is_cashier):
 			if self.target_doctype != "Sales Invoice":

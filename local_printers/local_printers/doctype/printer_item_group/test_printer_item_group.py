@@ -75,6 +75,16 @@ class TestPrinterItemGroup(FrappeTestCase):
 			with self.subTest(overrides=overrides), self.assertRaises(frappe.ValidationError):
 				self._new_configuration(**overrides).run_method("validate")
 
+	def test_default_kitchen_requires_on_submit_trigger(self):
+		for trigger_method in ("manual", "on_cancel"):
+			with self.subTest(trigger_method=trigger_method), self.assertRaisesRegex(
+				frappe.ValidationError,
+				"A default kitchen printer must use the on_submit trigger method.",
+			):
+				self._new_configuration(
+					is_default_kitchen=1, trigger_method=trigger_method
+				).run_method("validate")
+
 	def test_valid_default_kitchen_and_cashier_configurations(self):
 		self._new_configuration(is_default_kitchen=1).run_method("validate")
 		self._new_configuration(
