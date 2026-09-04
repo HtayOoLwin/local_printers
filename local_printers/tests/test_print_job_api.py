@@ -87,6 +87,7 @@ class FakeDB:
 		self.heartbeats = {}
 		self.pos_profiles = {"Main POS", "Other POS"}
 		self.last_claim_limit = None
+		self.job_snapshot_attempt_counts = {}
 		self.heartbeat_snapshot_stale = False
 		self.heartbeat_current_reads = []
 
@@ -143,7 +144,10 @@ class FakeDB:
 				and job["attempt_count"] < values["attempt_limit"]
 			]
 			rows.sort(key=lambda job: (job["creation"], job["name"]))
-			return [DictObject(name=job["name"]) for job in rows[: values["limit"]]]
+			return [
+				DictObject(name=job["name"], attempt_count=job["attempt_count"])
+				for job in rows[: values["limit"]]
+			]
 
 		if "WHERE job_id = %(job_id)s" in query:
 			job = self.jobs.get(values["job_id"])
@@ -166,6 +170,12 @@ class FakeDB:
 				job = self.jobs.get(name_or_filters)
 			if not job:
 				return None
+			if (
+				fields == "attempt_count"
+				and not isinstance(name_or_filters, dict)
+				and name_or_filters in self.job_snapshot_attempt_counts
+			):
+				return self.job_snapshot_attempt_counts[name_or_filters]
 			if isinstance(fields, (tuple, list)):
 				result = DictObject({field: job.get(field) for field in fields})
 				return result if as_dict else tuple(result.values())
@@ -547,6 +557,9 @@ class PrintJobAPITestCase(unittest.TestCase):
 		print_jobs.claim_jobs("kitchen-worker-1", limit=500)
 		self.assertEqual(self.db.last_claim_limit, 50)
 
+		print_jobs.claim_jobs("kitchen-worker-1", limit="9" * 10000)
+		self.assertEqual(self.db.last_claim_limit, 50)
+
 	def test_acknowledgement_validates_success_and_error(self):
 		self.bind_worker()
 		self.db.add_job(
@@ -609,10 +622,20 @@ class PrintJobAPITestCase(unittest.TestCase):
 
 	def test_automatic_claim_never_exceeds_three_attempts(self):
 		self.db.add_job(self.JOB_A, attempt_count=3)
+		self.db.job_snapshot_attempt_counts[self.JOB_A] = 2
 
 		result = print_jobs.claim_jobs("kitchen-worker-1")
 
 		self.assertEqual(result, {"jobs": []})
+		self.assertEqual(self.db.jobs[self.JOB_A]["attempt_count"], 3)
+
+	def test_claim_increments_the_current_locked_attempt_count(self):
+		self.db.add_job(self.JOB_A, attempt_count=2)
+		self.db.job_snapshot_attempt_counts[self.JOB_A] = 1
+
+		result = print_jobs.claim_jobs("kitchen-worker-1")
+
+		self.assertEqual(result["jobs"][0]["attempt_count"], 3)
 		self.assertEqual(self.db.jobs[self.JOB_A]["attempt_count"], 3)
 
 

@@ -57,7 +57,16 @@ def _validated_limit(limit: int) -> int:
 		value = limit.strip()
 		if not value.isdigit():
 			frappe.throw(_("Claim limit must be a positive integer."), frappe.ValidationError)
-		limit = int(value)
+		significant_digits = value.lstrip("0") or "0"
+		if len(significant_digits) > len(str(MAX_CLAIM_LIMIT)):
+			return MAX_CLAIM_LIMIT
+		try:
+			limit = int(significant_digits)
+		except (TypeError, ValueError, OverflowError):
+			frappe.throw(
+				_("Claim limit must be a positive integer."),
+				frappe.ValidationError,
+			)
 	elif not isinstance(limit, int):
 		frappe.throw(_("Claim limit must be a positive integer."), frappe.ValidationError)
 

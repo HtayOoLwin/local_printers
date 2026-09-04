@@ -116,7 +116,7 @@ def claim_next_jobs(worker_id: str, limit: int = 10) -> list[dict]:
 	# remain held until Frappe commits or rolls back the surrounding request.
 	rows = frappe.db.sql(
 		"""
-		SELECT name
+		SELECT name, attempt_count
 		FROM `tabLocal Print Job`
 		WHERE status = 'Pending'
 			AND attempt_count < %(attempt_limit)s
@@ -139,12 +139,7 @@ def claim_next_jobs(worker_id: str, limit: int = 10) -> list[dict]:
 				"status": "Printing",
 				"worker_id": worker_id,
 				"claimed_at": claimed_at,
-				"attempt_count": cint(
-					frappe.db.get_value(
-						"Local Print Job", row.name, "attempt_count"
-					)
-				)
-				+ 1,
+				"attempt_count": cint(row.attempt_count) + 1,
 			},
 			update_modified=False,
 		)
