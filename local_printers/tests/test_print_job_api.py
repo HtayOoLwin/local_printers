@@ -87,7 +87,8 @@ class FakeDB:
 		self.heartbeats = {}
 		self.pos_profiles = {"Main POS", "Other POS"}
 		self.last_claim_limit = None
-		self.heartbeat_lookup_misses = 0
+		self.heartbeat_snapshot_stale = False
+		self.heartbeat_current_reads = []
 
 	def add_job(
 		self,
@@ -122,6 +123,17 @@ class FakeDB:
 		}
 
 	def sql(self, query, values, as_dict=False):
+		if "FROM `tabLocal Printer Worker Heartbeat`" in query:
+			if "WHERE name = %(worker_id)s" not in query or "FOR UPDATE" not in query:
+				raise AssertionError("Heartbeat recovery must use a bound locking read")
+			if values != {"worker_id": values.get("worker_id")}:
+				raise AssertionError("Heartbeat recovery accepts only worker_id")
+			if values["worker_id"] in query:
+				raise AssertionError("Worker ID must be passed as a SQL parameter")
+			self.heartbeat_current_reads.append(dict(values))
+			heartbeat = self.heartbeats.get(values["worker_id"])
+			return [DictObject(user=heartbeat["user"])] if heartbeat else []
+
 		if "WHERE status = 'Pending'" in query:
 			self.last_claim_limit = values["limit"]
 			rows = [
@@ -159,8 +171,7 @@ class FakeDB:
 				return result if as_dict else tuple(result.values())
 			return job.get(fields)
 		if doctype == "Local Printer Worker Heartbeat":
-			if self.heartbeat_lookup_misses:
-				self.heartbeat_lookup_misses -= 1
+			if self.heartbeat_snapshot_stale:
 				return None
 			heartbeat = self.heartbeats.get(name_or_filters)
 			return heartbeat.get(fields) if heartbeat else None
@@ -190,9 +201,6 @@ class FakeDB:
 
 	def exists(self, doctype, name_or_filters):
 		if doctype == "Local Printer Worker Heartbeat":
-			if self.heartbeat_lookup_misses:
-				self.heartbeat_lookup_misses -= 1
-				return None
 			return name_or_filters if name_or_filters in self.heartbeats else None
 		if doctype == "POS Profile":
 			return name_or_filters if name_or_filters in self.pos_profiles else None
@@ -403,24 +411,32 @@ class PrintJobAPITestCase(unittest.TestCase):
 
 	def test_duplicate_worker_registration_race_recovers_for_same_owner(self):
 		self.bind_worker()
-		self.db.heartbeat_lookup_misses = 1
+		self.db.heartbeat_snapshot_stale = True
 
 		print_jobs.claim_jobs("kitchen-worker-1")
 
 		self.assertEqual(
 			self.db.heartbeats["kitchen-worker-1"]["last_seen"], NOW
 		)
+		self.assertEqual(
+			self.db.heartbeat_current_reads,
+			[{"worker_id": "kitchen-worker-1"}],
+		)
 
 	def test_duplicate_worker_registration_race_cannot_replace_owner(self):
 		self.bind_worker(user="first-worker@example.com")
 		original = dict(self.db.heartbeats["kitchen-worker-1"])
-		self.db.heartbeat_lookup_misses = 1
+		self.db.heartbeat_snapshot_stale = True
 		frappe.session.user = "second-worker@example.com"
 
 		with self.assertRaises(frappe.PermissionError):
 			print_jobs.claim_jobs("kitchen-worker-1")
 
 		self.assertEqual(self.db.heartbeats["kitchen-worker-1"], original)
+		self.assertEqual(
+			self.db.heartbeat_current_reads,
+			[{"worker_id": "kitchen-worker-1"}],
+		)
 
 	def test_manager_and_system_manager_can_retry_failed_job(self):
 		for role in ("Restaurant Manager", "System Manager"):

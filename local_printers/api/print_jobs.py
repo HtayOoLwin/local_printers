@@ -106,6 +106,20 @@ def _worker_owner(worker_id: str) -> str | None:
 	)
 
 
+def _locked_worker_owner(worker_id: str) -> str | None:
+	rows = frappe.db.sql(
+		"""
+		SELECT `user`
+		FROM `tabLocal Printer Worker Heartbeat`
+		WHERE name = %(worker_id)s
+		FOR UPDATE
+		""",
+		{"worker_id": worker_id},
+		as_dict=True,
+	)
+	return rows[0].user if rows else None
+
+
 def _require_worker_owner(worker_id: str) -> None:
 	if _worker_owner(worker_id) != frappe.session.user:
 		frappe.throw(
@@ -140,9 +154,13 @@ def _register_or_touch_worker(worker_id: str) -> None:
 			}
 		).insert(ignore_permissions=True)
 	except frappe.DuplicateEntryError:
-		# Re-read the binding after a concurrent registration attempt. Only the
-		# same authenticated owner may recover the race and refresh last_seen.
-		_require_worker_owner(worker_id)
+		# Locking reads see the concurrently committed binding even when this
+		# transaction's ordinary reads still use an older repeatable-read snapshot.
+		if _locked_worker_owner(worker_id) != frappe.session.user:
+			frappe.throw(
+				_("This worker ID belongs to a different authenticated user."),
+				frappe.PermissionError,
+			)
 		_update_worker_heartbeat(worker_id)
 
 
