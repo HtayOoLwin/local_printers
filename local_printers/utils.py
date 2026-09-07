@@ -20,11 +20,10 @@ def send_doc_details_on_event(doc, method=None):
       - pdf_base64: base64-encoded PDF content (ready to print)
       - document_name: document name (for logging)
     """
-    # Guard against the wildcard ("*") doc_events hook firing on every doctype:
-    # skip anything that can't possibly be POS-linked, and explicitly skip
-    # "Error Log" so a failure here can never recursively re-trigger itself
-    # via frappe.log_error() creating a new Error Log document.
-    if doc.doctype == "Error Log" or not getattr(doc, "pos_profile", None):
+    # Guard against the wildcard ("*") doc_events hook firing for Error Log.
+    # Documents without pos_profile are handled selectively by
+    # get_printer_settings(); draft Sales Orders can fall back to company.
+    if doc.doctype == "Error Log":
         return
 
     trigger_method = method or "on_submit"
@@ -152,28 +151,54 @@ def build_print_jobs(doc, trigger_method):
 
 def get_printer_settings(doc, trigger_method):
     """
-    Return a dict keyed by Printer Item Group name:
-      {
-        "PIG-xxx": {
-          "meta": { printer, printer_ip, is_cashier, print_format, no_letterhead },
-          "items": [ { item_code, ... }, ... ]
-        }
-      }
+    Return a dict keyed by Printer Item Group name.
+
+    Normal POS documents route by pos_profile. A draft Sales Order created by
+    the restaurant mobile flow may not have a pos_profile field/value, so its
+    after_insert event can fall back to the document company when that company
+    resolves to exactly one POS Profile in Printer Item Group. If more than one
+    POS Profile is configured for the same company, routing is skipped to avoid
+    duplicate or ambiguous printing.
     """
     result = {}
 
-    if not getattr(doc, "pos_profile", None):
+    pos_profile = getattr(doc, "pos_profile", None)
+    filters = {
+        "target_doctype": doc.doctype,
+        "trigger_method": trigger_method,
+    }
+
+    if pos_profile:
+        filters["pos_profile"] = pos_profile
+    elif doc.doctype == "Sales Order" and trigger_method == "after_insert":
+        company = getattr(doc, "company", None)
+        if not company:
+            return result
+        filters["company"] = company
+    else:
         return result
 
     printers = frappe.get_all(
         "Printer Item Group",
-        filters={
-            "pos_profile": doc.pos_profile,
-            "target_doctype": doc.doctype,
-            "trigger_method": trigger_method,
-        },
+        filters=filters,
+        fields=["name", "pos_profile"],
         order_by="is_cashier desc",
     )
+
+    if not pos_profile:
+        distinct_pos_profiles = {
+            printer_ref.get("pos_profile")
+            for printer_ref in printers
+            if printer_ref.get("pos_profile")
+        }
+        if len(distinct_pos_profiles) != 1:
+            if printers:
+                frappe.log(
+                    f"Skipped draft Sales Order printer routing for {doc.name}: "
+                    f"company {getattr(doc, 'company', None)} maps to "
+                    f"{len(distinct_pos_profiles)} POS Profiles."
+                )
+            return result
 
     doc_items = getattr(doc, "items", None)
 
@@ -200,7 +225,7 @@ def get_printer_settings(doc, trigger_method):
         for item in doc_items:
             item_group = frappe.db.get_value("Item", item.item_code, "item_group")
             if (
-               "All Item Groups" in item_groups
+                "All Item Groups" in item_groups
                 or item_group in item_groups
             ):
                 if printer_doc.name not in result:
