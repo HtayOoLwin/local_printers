@@ -20,13 +20,19 @@ def send_doc_details_on_event(doc, method=None):
       - pdf_base64: base64-encoded PDF content (ready to print)
       - document_name: document name (for logging)
     """
-    # Guard against the wildcard ("*") doc_events hook firing for Error Log.
-    # Documents without pos_profile are handled selectively by
-    # get_printer_settings(); draft Sales Orders can fall back to company.
-    if doc.doctype == "Error Log":
-        return
-
     trigger_method = method or "on_submit"
+    has_pos_profile = bool(getattr(doc, "pos_profile", None))
+    is_draft_sales_order_event = (
+        doc.doctype == "Sales Order" and trigger_method == "after_insert"
+    )
+
+    # The wildcard hook should ignore unrelated documents. Draft restaurant
+    # Sales Orders are the one supported exception because they can route by
+    # company when no pos_profile exists on the Sales Order.
+    if doc.doctype == "Error Log" or (
+        not has_pos_profile and not is_draft_sales_order_event
+    ):
+        return
 
     try:
         print_jobs = build_print_jobs(doc, trigger_method)
